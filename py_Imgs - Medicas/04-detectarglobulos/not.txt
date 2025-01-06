@@ -1,0 +1,5 @@
+• Divisão de canais
+• Esquemas de cor
+• Subtração de canais
+• Limiarização Otsu
+• Detecção - Caixa em torno do objeto na imagem.
