@@ -1,0 +1,249 @@
+                        Resumao
+
+• Primeiro, aprendemos a manipular imagens aplicando filtros e modificando esquemas de cores.
+
+• Em seguida, utilizamos esse conhecimento para detectar glóbulos brancos em uma base de dados.
+
+• Dividimos as imagens em classes específicas de glóbulos (NEUTROPHIL, BASOPHIL, EOSINOPHIL, MONOCYTE, LYMPHOCYTE)
+ e realizamos a extração de características e classificação, escolhendo o melhor classificador.
+
+• Com o classificador escolhido, selecionamos a melhor rede neural.
+
+• Usamos deep features com a rede neural de melhor desempenho para extrair as características profundas das imagens.
+    estração das caracteristicas profundas.
+
+
+O QUE ESTA COM MELHOR DESEMPENHO É EficientNet --> svm/adaboost--> hsv
+
+
+
+
+
+import os
+import gc
+import cv2
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, cohen_kappa_score
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.applications import VGG16, ResNet50, DenseNet121, InceptionV3, EfficientNetB0, Xception, MobileNetV2
+from tensorflow.keras import models, layers, optimizers, callbacks
+from tensorflow.keras import backend as K
+import pickle
+from sklearn.svm import SVC
+from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+import xgboost as xgb
+
+
+# Criando função para calcular as métricas
+def get_metrics(y_true, y_pred):
+    vn, fp, fn, vp = confusion_matrix(y_true, y_pred).ravel()
+    accuracy = (vp + vn) / (vp + fp + fn + vn)
+    recall = vp / (vp + fn)
+    specificity = vn / (vn + fp)
+    precision = vp / (vp + fp)
+    f1 = f1_score(y_true, y_pred)
+    kappa = cohen_kappa_score(y_true, y_pred)
+    auc_roc = roc_auc_score(y_true, y_pred)
+
+    return {
+        'accuracy': accuracy,
+        'specificity': specificity,
+        'recall': recall,
+        'precision': precision,
+        'f1-score': f1,
+        'kappa': kappa,
+        'auc-roc': auc_roc
+    }
+
+# Criando função para seleção de esquema de cor 
+def convert_color_scale(image, scale):
+    if scale == 'hsv':
+        return cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    elif scale == 'rgb':
+        return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    elif scale == 'grayscale':
+        # Converter para escala de cinza e replicar para 3 canais
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return cv2.merge([gray, gray, gray])
+    elif scale == 'lab':
+        return cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    elif scale == 'luv':
+        return cv2.cvtColor(image, cv2.COLOR_BGR2LUV)
+    elif scale == 'xyz':
+        return cv2.cvtColor(image, cv2.COLOR_BGR2XYZ)
+    else:
+        raise ValueError("Escala de cor não suportada.")
+
+# Carregamento e pré-processamento de imagens com escolha de escala de cor
+def load_images(folder, color_scale, img_extensions):
+    images = []
+    for filename in os.listdir(folder):
+        if any(filename.lower().endswith(ext) for ext in img_extensions):
+            img_path = os.path.join(folder, filename)
+            img = cv2.imread(img_path)
+            
+            if img is not None:
+                img = cv2.resize(img, (224, 224))  # Ajuste o tamanho conforme necessário
+
+                # Converta para a escala de cor desejada
+                img = convert_color_scale(img, color_scale)
+
+                # Se a imagem estiver em escala de cinza, expanda as dimensões
+                if color_scale == 'grayscale':
+                    img = np.expand_dims(img, axis=-1)  # Adiciona uma dimensão de canal
+
+                images.append(img)
+    return np.array(images)
+
+# Defina as pastas de dados
+data_dir = r"C:\Users\andre\Pictures\OvarianCancer"
+normal_dir = os.path.join(data_dir, 'Non_Cancerous')
+cancer_dir = os.path.join(data_dir, 'Serous')
+img_extensions = ['.jpg', '.jpeg', '.png']
+
+# Criar um DataFrame para armazenar os resultados
+columns = ['Modelo', 'Acuracia', 'Sensibilidade', 'Especificidade', 'F-Score', 'AUC-ROC']
+df_metrics = pd.DataFrame(columns=columns)
+
+# Carregar o modelo InceptionV3 pré-treinado
+base_model = EfficientNetB0(weights='imagenet', include_top=False)     # <----------------------------------------------------------
+
+# Extrair características usando o modelo VGG16
+def extract_features(model, X):
+    features = model.predict(X)
+    return features.reshape((features.shape[0], -1))
+
+# Carregamento de imagens e conversão para XYZ
+normal_images = load_images(normal_dir, 'hsv',img_extensions)        # <----------------------------------------------------------
+cancer_images = load_images(cancer_dir, 'hsv',img_extensions)        # hsv<----------------------------------------------------------
+
+
+# Rótulos para imagens (0 para normal, 1 para câncer)
+normal_labels = np.zeros(normal_images.shape[0])
+cancer_labels = np.ones(cancer_images.shape[0])
+
+# Concatenar imagens e rótulos
+all_images = np.concatenate([normal_images, cancer_images], axis=0)
+all_images = extract_features(base_model, all_images)
+all_labels = np.concatenate([normal_labels, cancer_labels], axis=0)
+
+# Dividir o conjunto de dados em treino e teste (80/20)
+X_train, X_test, y_train, y_test = train_test_split(all_images, all_labels, test_size=0.2, random_state=42)
+
+X_train = X_train / 255.0
+X_test = X_test / 255.0
+
+# Classificação com 5 classificadores
+# Para o SVM
+svm_model = SVC(random_state=42, kernel='rbf', C=1, gamma='scale')
+svm_model.fit(X_train, y_train)
+y_pred_svm = svm_model.predict(X_test)
+metrics_svm = get_metrics(y_test, y_pred_svm)
+print("Métricas para SVM:")
+print(metrics_svm)
+
+# Para o Random Forest
+rf_model = RandomForestClassifier(random_state=42, n_estimators=100, max_depth=10)
+rf_model.fit(X_train, y_train)
+y_pred_rf = rf_model.predict(X_test)
+metrics_rf = get_metrics(y_test, y_pred_rf)
+print("Métricas para Random Forest:")
+print(metrics_rf)
+
+# Para o KNN
+knn_model = KNeighborsClassifier(n_neighbors=5)
+knn_model.fit(X_train, y_train)
+y_pred_knn = knn_model.predict(X_test)
+metrics_knn = get_metrics(y_test, y_pred_knn)
+print("Métricas para K-Nearest Neighbors (KNN):")
+print(metrics_knn)
+
+# Para o AdaBoost
+adaboost_model = AdaBoostClassifier(random_state=42, n_estimators=50, learning_rate=1.0)
+adaboost_model.fit(X_train, y_train)
+y_pred_adaboost = adaboost_model.predict(X_test)
+metrics_adaboost = get_metrics(y_test, y_pred_adaboost)
+print("Métricas para AdaBoost (Gradient Boosting):")
+print(metrics_adaboost)
+
+# Para o XGB
+xgb_model = xgb.XGBClassifier(objective='binary:logistic', random_state=42, max_depth=9, 
+                              colsample_bytree=0.4033, min_child_weight=6, gamma=0.429, 
+                              eta=0.5995, n_estimators=1000, use_label_encoder=False, 
+                              eval_metric='merror')
+xgb_model.fit(X_train, y_train)
+y_pred_xgb = xgb_model.predict(X_test)
+metrics_xgb = get_metrics(y_test, y_pred_xgb)
+print("Métricas para XGBoost:")
+print(metrics_xgb)
+
+# Criar DataFrames e salvar os resultados em um xlsx 
+df_metrics_svm = pd.DataFrame([metrics_svm.values()], columns=metrics_svm.keys())
+df_metrics_svm.insert(0, 'Classificador', 'SVM')
+
+df_metrics_rf = pd.DataFrame([metrics_rf.values()], columns=metrics_rf.keys())
+df_metrics_rf.insert(0, 'Classificador', 'RF')
+
+df_metrics_knn = pd.DataFrame([metrics_knn.values()], columns=metrics_knn.keys())
+df_metrics_knn.insert(0, 'Classificador', 'KNN')
+
+df_metrics_adaboost = pd.DataFrame([metrics_adaboost.values()], columns=metrics_adaboost.keys())
+df_metrics_adaboost.insert(0, 'Classificador', 'AdaBoost')
+
+df_metrics_xgb = pd.DataFrame([metrics_xgb.values()], columns=metrics_xgb.keys())
+df_metrics_xgb.insert(0, 'Classificador', 'XGBoost')
+
+# Concatenar todos os DataFrames
+df_all_metrics = pd.concat([df_metrics_svm, df_metrics_rf, df_metrics_knn, df_metrics_adaboost, df_metrics_xgb])
+
+# Salvar o DataFrame em um arquivo Excel
+df_all_metrics.to_excel('eficient-hsvvv.xlsx', index=False)     # <----------------------------------------------------------
+
+df_all_metrics
+
+# Defina o número de splits para a validação cruzada
+from sklearn.model_selection import KFold
+num_splits = 5
+kf = KFold(n_splits=num_splits, shuffle=True, random_state=42)
+
+# Crie uma lista para armazenar os resultados de cada fold
+metrics_list = []
+
+X = all_images
+y = all_labels
+
+for fold, (train_index, test_index) in enumerate(kf.split(X), 1):
+    # Divida os dados em treino e teste
+    X_train, X_test = X[train_index], X[test_index]
+    y_train, y_test = y[train_index], y[test_index]
+    
+    # Crie e treine o modelo
+    svm_model = SVC(random_state=42, kernel='poly', C=1, gamma='auto')
+    svm_model.fit(X_train, y_train)
+    
+    # Faça a predição
+    y_pred = svm_model.predict(X_test)
+    
+    # Calcule as métricas
+    metrics = get_metrics(y_test, y_pred)
+    metrics_list.append(metrics)
+
+# Crie um DataFrame para armazenar os resultados de cada fold
+metrics_df = pd.DataFrame(metrics_list)
+
+# Calcule a média e o desvio padrão
+mean_metrics = metrics_df.mean()
+std_metrics = metrics_df.std()
+
+# Adicione as linhas de média e desvio padrão ao DataFrame
+metrics_df.loc['Média'] = mean_metrics
+metrics_df.loc['Desvio Padrão'] = std_metrics
+
+print("Métricas para cada fold:")
+metrics_df
+
